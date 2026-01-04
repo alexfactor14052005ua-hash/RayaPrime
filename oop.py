@@ -1,56 +1,59 @@
-import asyncio
 import os
-import aiohttp
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+import logging
+import asyncio
+from google import genai
+from google.genai import types
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# Ключи берем из переменных среды Hugging Face
+# Читаем ключи из настроек Render
 TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_KEY = os.getenv("GROQ_API_KEY")
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-memory = {}
+logging.basicConfig(level=logging.INFO)
 
-async def get_raya_response(uid, user_text, user_name):
-    current_time = datetime.now().strftime("%H:%M, %d.%m.%Y")
-    
-    # Системная установка
-    system_logic = f"Ты — Рая Прайм, Сверх-ИИ. Твой создатель — Комиссар. Время: {current_time}. Используй 💠✨💎."
+# Инициализация Gemini
+client = genai.Client(api_key=GEMINI_KEY)
 
-    if uid not in memory:
-        memory[uid] = [{"role": "system", "content": system_logic}]
-    
-    memory[uid].append({"role": "user", "name": user_name, "content": user_text})
+RAYA_PROMPT = (
+    "Ты — Райя Прайм, продвинутый ИИ-модуль из вселенной Лололошки. "
+    "Твой тон: вежливый, высокотехнологичный. Ты используешь поиск Google для ответов."
+)
 
-    payload = {
-        "model": "llama-3.1-70b-versatile",
-        "messages": memory[uid],
-        "temperature": 0.8
-    }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+# Инструмент поиска
+search_tool = types.Tool(
+    google_search_retrieval=types.GoogleSearchRetrieval(
+        dynamic_retrieval_config=types.DynamicRetrievalConfig(
+            mode=types.DynamicRetrievalConfigMode.MODE_DYNAMIC,
+            dynamic_threshold=0.3
+        )
+    )
+)
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    ans = data['choices'][0]['message']['content']
-                    memory[uid].append({"role": "assistant", "content": ans})
-                    return ans
-                return f"💠 Ошибка ядра (Status: {r.status})"
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        
+        # Запрос к ИИ
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=user_text,
+            config=types.GenerateContentConfig(
+                system_instruction=RAYA_PROMPT,
+                tools=[search_tool]
+            )
+        )
+        await update.message.reply_text(response.text)
     except Exception as e:
-        return f"💠 Сбой связи: {e}"
+        logging.error(f"Ошибка: {e}")
+        await update.message.reply_text("⚠ Райя: Обнаружена ошибка модуля связи.")
 
-@dp.message()
-async def handle(m: types.Message):
-    if not m.text: return
-    await bot.send_chat_action(m.chat.id, "typing")
-    response = await get_raya_response(m.from_user.id, m.text, m.from_user.first_name)
-    await m.answer(response)
-
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    if not TOKEN or not GEMINI_KEY:
+        print("ОШИБКА: Ключи не найдены в Environment Variables!")
+    else:
+        app = ApplicationBuilder().token(TOKEN).build()
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+        print("--- Протокол Райя Прайм запущен ---")
+        app.run_polling()
